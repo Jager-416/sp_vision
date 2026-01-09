@@ -6,6 +6,7 @@
 #include <openvino/openvino.hpp>
 #include <tuple>
 
+#include "tasks/auto_aim/yolo.hpp"
 #include "tasks/auto_aim/yolos/yolov5.hpp"
 #include "tools/logger.hpp"
 #include "tools/thread_safe_queue.hpp"
