@@ -59,8 +59,33 @@ Classifier::Classifier(const std::string & config_path)
     auto config = std::unique_ptr<nvinfer1::IBuilderConfig>(builder->createBuilderConfig());
     config->setMemoryPoolLimit(nvinfer1::MemoryPoolType::kWORKSPACE, 1ULL << 30); // 1GB
 
+    // Check if model has dynamic shapes and create optimization profile
+    auto input = network->getInput(0);
+    auto input_dims = input->getDimensions();
+    bool has_dynamic_shapes = false;
+    for (int i = 0; i < input_dims.nbDims; i++) {
+      if (input_dims.d[i] == -1) {
+        has_dynamic_shapes = true;
+        break;
+      }
+    }
+
+    if (has_dynamic_shapes) {
+      auto profile = builder->createOptimizationProfile();
+      // For classifier: input shape is [batch, channels, height, width] = [1, 1, 32, 32]
+      nvinfer1::Dims4 dims(1, 1, 32, 32);
+      profile->setDimensions(input->getName(), nvinfer1::OptProfileSelector::kMIN, dims);
+      profile->setDimensions(input->getName(), nvinfer1::OptProfileSelector::kOPT, dims);
+      profile->setDimensions(input->getName(), nvinfer1::OptProfileSelector::kMAX, dims);
+      config->addOptimizationProfile(profile);
+    }
+
     auto serialized_engine = std::unique_ptr<nvinfer1::IHostMemory>(
       builder->buildSerializedNetwork(*network, *config));
+
+    if (!serialized_engine) {
+      throw std::runtime_error("Failed to build TensorRT engine");
+    }
 
     auto runtime = std::unique_ptr<nvinfer1::IRuntime>(nvinfer1::createInferRuntime(gLogger));
     engine_ = std::shared_ptr<nvinfer1::ICudaEngine>(
