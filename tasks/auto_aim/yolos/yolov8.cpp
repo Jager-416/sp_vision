@@ -89,8 +89,33 @@ YOLOV8::YOLOV8(const std::string & config_path, bool debug)
     auto config = std::unique_ptr<nvinfer1::IBuilderConfig>(builder->createBuilderConfig());
     config->setMemoryPoolLimit(nvinfer1::MemoryPoolType::kWORKSPACE, 1ULL << 30);
 
+    // Check if model has dynamic shapes and create optimization profile
+    auto input = network->getInput(0);
+    auto input_dims = input->getDimensions();
+    bool has_dynamic_shapes = false;
+    for (int i = 0; i < input_dims.nbDims; i++) {
+      if (input_dims.d[i] == -1) {
+        has_dynamic_shapes = true;
+        break;
+      }
+    }
+
+    if (has_dynamic_shapes) {
+      auto profile = builder->createOptimizationProfile();
+      // For YOLOV8: input shape is [batch, channels, height, width] = [1, 3, 416, 416]
+      nvinfer1::Dims4 dims(1, 3, 416, 416);
+      profile->setDimensions(input->getName(), nvinfer1::OptProfileSelector::kMIN, dims);
+      profile->setDimensions(input->getName(), nvinfer1::OptProfileSelector::kOPT, dims);
+      profile->setDimensions(input->getName(), nvinfer1::OptProfileSelector::kMAX, dims);
+      config->addOptimizationProfile(profile);
+    }
+
     auto serialized_engine = std::unique_ptr<nvinfer1::IHostMemory>(
       builder->buildSerializedNetwork(*network, *config));
+
+    if (!serialized_engine) {
+      throw std::runtime_error("Failed to build TensorRT engine");
+    }
 
     auto runtime = std::unique_ptr<nvinfer1::IRuntime>(nvinfer1::createInferRuntime(gLogger));
     engine_ = std::shared_ptr<nvinfer1::ICudaEngine>(
