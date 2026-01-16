@@ -1,22 +1,113 @@
 #include "yolo11_buff.hpp"
 
+#include <fstream>
+#include <iostream>
+
 const double ConfidenceThreshold = 0.7f;
 const double IouThreshold = 0.4f;
+
+// TensorRT Logger
+namespace {
+class Logger : public nvinfer1::ILogger
+{
+  void log(Severity severity, const char* msg) noexcept override
+  {
+    if (severity <= Severity::kWARNING)
+      std::cout << "[TensorRT BUFF] " << msg << std::endl;
+  }
+};
+Logger gLogger;
+}
 namespace auto_buff
 {
 YOLO11_BUFF::YOLO11_BUFF(const std::string & config)
 {
   auto yaml = YAML::LoadFile(config);
   std::string model_path = yaml["model"].as<std::string>();
-  model = core.read_model(model_path);
-  // printInputAndOutputsInfo(*model);  // 打印模型信息
-  /// 载入并编译模型
-  compiled_model = core.compile_model(model, "CPU");
-  /// 创建推理请求
-  infer_request = compiled_model.create_infer_request();
-  // 获取模型输入节点
-  input_tensor = infer_request.get_input_tensor();
-  input_tensor.set_shape({1, 3, 640, 640});
+
+  // Initialize TensorRT
+  cudaStreamCreate(&stream_);
+
+  std::string engine_path = model_path.substr(0, model_path.find_last_of('.')) + ".engine";
+  std::ifstream engine_file(engine_path, std::ios::binary);
+
+  if (engine_file.good()) {
+    std::cout << "Loading TensorRT engine from " << engine_path << std::endl;
+    engine_file.seekg(0, std::ios::end);
+    size_t size = engine_file.tellg();
+    engine_file.seekg(0, std::ios::beg);
+    std::vector<char> engine_data(size);
+    engine_file.read(engine_data.data(), size);
+    engine_file.close();
+
+    auto runtime = std::unique_ptr<nvinfer1::IRuntime>(nvinfer1::createInferRuntime(gLogger));
+    engine_ = std::shared_ptr<nvinfer1::ICudaEngine>(
+      runtime->deserializeCudaEngine(engine_data.data(), size),
+      [](nvinfer1::ICudaEngine* e) { if(e) e->destroy(); });
+  } else {
+    std::cout << "Building TensorRT engine from ONNX: " << model_path << std::endl;
+    auto builder = std::unique_ptr<nvinfer1::IBuilder>(nvinfer1::createInferBuilder(gLogger));
+    auto network = std::unique_ptr<nvinfer1::INetworkDefinition>(
+      builder->createNetworkV2(1U << static_cast<uint32_t>(nvinfer1::NetworkDefinitionCreationFlag::kEXPLICIT_BATCH)));
+    auto parser = std::unique_ptr<nvonnxparser::IParser>(nvonnxparser::createParser(*network, gLogger));
+
+    std::string onnx_path = model_path;
+    if (model_path.substr(model_path.find_last_of('.')) == ".xml") {
+      onnx_path = model_path.substr(0, model_path.find_last_of('.')) + ".onnx";
+    }
+
+    if (!parser->parseFromFile(onnx_path.c_str(), static_cast<int>(nvinfer1::ILogger::Severity::kWARNING))) {
+      throw std::runtime_error("Failed to parse ONNX file: " + onnx_path);
+    }
+
+    auto config_builder = std::unique_ptr<nvinfer1::IBuilderConfig>(builder->createBuilderConfig());
+    config_builder->setMemoryPoolLimit(nvinfer1::MemoryPoolType::kWORKSPACE, 1ULL << 30);
+
+    auto serialized_engine = std::unique_ptr<nvinfer1::IHostMemory>(
+      builder->buildSerializedNetwork(*network, *config_builder));
+
+    auto runtime = std::unique_ptr<nvinfer1::IRuntime>(nvinfer1::createInferRuntime(gLogger));
+    engine_ = std::shared_ptr<nvinfer1::ICudaEngine>(
+      runtime->deserializeCudaEngine(serialized_engine->data(), serialized_engine->size()),
+      [](nvinfer1::ICudaEngine* e) { if(e) e->destroy(); });
+
+    std::ofstream engine_out(engine_path, std::ios::binary);
+    engine_out.write(static_cast<const char*>(serialized_engine->data()), serialized_engine->size());
+    engine_out.close();
+    std::cout << "Engine saved to " << engine_path << std::endl;
+  }
+
+  context_ = std::shared_ptr<nvinfer1::IExecutionContext>(
+    engine_->createExecutionContext(),
+    [](nvinfer1::IExecutionContext* c) { if(c) c->destroy(); });
+
+  input_index_ = engine_->getBindingIndex("images");
+  if (input_index_ == -1) input_index_ = 0;
+  output_index_ = engine_->getBindingIndex("output0");
+  if (output_index_ == -1) output_index_ = 1;
+
+  auto input_dims = engine_->getBindingDimensions(input_index_);
+  auto output_dims = engine_->getBindingDimensions(output_index_);
+
+  input_size_ = 1;
+  for (int i = 0; i < input_dims.nbDims; i++) {
+    input_size_ *= input_dims.d[i];
+  }
+
+  output_size_ = 1;
+  for (int i = 0; i < output_dims.nbDims; i++) {
+    output_size_ *= output_dims.d[i];
+  }
+
+  cudaMalloc(&buffers_[input_index_], input_size_ * sizeof(float));
+  cudaMalloc(&buffers_[output_index_], output_size_ * sizeof(float));
+}
+
+YOLO11_BUFF::~YOLO11_BUFF()
+{
+  if (buffers_[input_index_]) cudaFree(buffers_[input_index_]);
+  if (buffers_[output_index_]) cudaFree(buffers_[output_index_]);
+  if (stream_) cudaStreamDestroy(stream_);
 }
 
 std::vector<YOLO11_BUFF::Object> YOLO11_BUFF::get_multicandidateboxes(cv::Mat & image)
@@ -42,23 +133,43 @@ std::vector<YOLO11_BUFF::Object> YOLO11_BUFF::get_multicandidateboxes(cv::Mat & 
 
   double factor = scale;  
 
-  // preproces
-  auto input = cv::Mat(640, 640, CV_8UC3, cv::Scalar(0, 0, 0));
+  // Preprocess: resize and pad
+  auto input_bgr = cv::Mat(640, 640, CV_8UC3, cv::Scalar(0, 0, 0));
   auto roi = cv::Rect(0, 0, w, h);
-  cv::resize(bgr_img, input(roi), {w, h});
-  ov::Tensor input_tensor(ov::element::u8, {1, 640, 640, 3}, input.data);
+  cv::resize(bgr_img, input_bgr(roi), {w, h});
 
-  /// 执行推理计算
-  infer_request.infer();
+  // Convert BGR to RGB and normalize
+  cv::Mat input_rgb;
+  cv::cvtColor(input_bgr, input_rgb, cv::COLOR_BGR2RGB);
+  input_rgb.convertTo(input_rgb, CV_32F, 1.0 / 255.0);
 
-  /// 处理推理计算结果
-  const ov::Tensor output = infer_request.get_output_tensor();  // 获得推理结果
-  const ov::Shape output_shape = output.get_shape();
-  const float * output_buffer = output.data<const float>();
-  const int out_rows = output_shape[1];  // 获得"output"节点的rows 15
-  const int out_cols = output_shape[2];  // 获得"output"节点的cols 8400
-  const cv::Mat det_output(
-    out_rows, out_cols, CV_32F, (float *)output_buffer);  // output_buff类型转换
+  // Convert from HWC to CHW
+  std::vector<cv::Mat> channels(3);
+  cv::split(input_rgb, channels);
+  std::vector<float> input_data;
+  input_data.reserve(640 * 640 * 3);
+  for (int c = 0; c < 3; ++c) {
+    input_data.insert(input_data.end(), (float*)channels[c].datastart, (float*)channels[c].dataend);
+  }
+
+  // Copy input to GPU
+  cudaMemcpyAsync(buffers_[input_index_], input_data.data(), input_size_ * sizeof(float),
+                  cudaMemcpyHostToDevice, stream_);
+
+  // Execute inference
+  context_->enqueueV2(buffers_, stream_, nullptr);
+
+  // Copy output from GPU
+  std::vector<float> output_data(output_size_);
+  cudaMemcpyAsync(output_data.data(), buffers_[output_index_], output_size_ * sizeof(float),
+                  cudaMemcpyDeviceToHost, stream_);
+  cudaStreamSynchronize(stream_);
+
+  // Get output dimensions
+  auto output_dims = engine_->getBindingDimensions(output_index_);
+  const int out_rows = output_dims.d[1];  // rows
+  const int out_cols = output_dims.d[2];  // cols
+  const cv::Mat det_output(out_rows, out_cols, CV_32F, output_data.data());
   std::vector<cv::Rect> boxes;                            // 目标框
   std::vector<float> confidences;                         // 置信度
   std::vector<std::vector<float>> objects_keypoints;      // 关键点

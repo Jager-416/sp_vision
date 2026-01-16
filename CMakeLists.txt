@@ -12,11 +12,16 @@ find_package(Eigen3 REQUIRED)
 find_package(spdlog REQUIRED)
 find_package(yaml-cpp REQUIRED)
 find_package(nlohmann_json REQUIRED)
-set(OpenVINO_DIR "/opt/intel/openvino_2024.6.0/runtime/cmake/")
-find_package(OpenVINO REQUIRED)
+find_package(CUDA REQUIRED)
+
+# TensorRT paths for JetPack 6.0
+set(TensorRT_INCLUDE_DIRS "/usr/include/aarch64-linux-gnu")
+set(TensorRT_LIBRARIES nvinfer nvonnxparser nvinfer_plugin nvparsers)
 
 include_directories(${EIGEN3_INCLUDE_DIR})
 include_directories(${OpenCV_INCLUDE_DIRS})
+include_directories(${CUDA_INCLUDE_DIRS})
+include_directories(${TensorRT_INCLUDE_DIRS})
 include_directories(${PROJECT_SOURCE_DIR})
 
 

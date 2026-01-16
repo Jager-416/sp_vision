@@ -2,8 +2,11 @@
 #define AUTO_AIM__CLASSIFIER_HPP
 
 #include <opencv2/opencv.hpp>
-#include <openvino/openvino.hpp>
+#include <NvInfer.h>
+#include <NvOnnxParser.h>
 #include <string>
+#include <memory>
+#include <vector>
 
 #include "armor.hpp"
 
@@ -13,6 +16,7 @@ class Classifier
 {
 public:
   explicit Classifier(const std::string & config_path);
+  ~Classifier();
 
   void classify(Armor & armor);
 
@@ -20,8 +24,16 @@ public:
 
 private:
   cv::dnn::Net net_;
-  ov::Core core_;
-  ov::CompiledModel compiled_model_;
+
+  // TensorRT members
+  std::shared_ptr<nvinfer1::ICudaEngine> engine_;
+  std::shared_ptr<nvinfer1::IExecutionContext> context_;
+  void* buffers_[2]; // input and output buffers
+  cudaStream_t stream_;
+  int input_index_;
+  int output_index_;
+  size_t input_size_;
+  size_t output_size_;
 };
 
 }  // namespace auto_aim
