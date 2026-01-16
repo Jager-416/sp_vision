@@ -41,6 +41,8 @@ public:
   std::tuple<cv::Mat, std::list<Armor>, std::chrono::steady_clock::time_point> debug_pop();
 
 private:
+  // TensorRT members (runtime must outlive engine)
+  std::shared_ptr<nvinfer1::IRuntime> runtime_;
   std::shared_ptr<nvinfer1::ICudaEngine> engine_;
   std::shared_ptr<nvinfer1::IExecutionContext> context_;
   std::string device_;
