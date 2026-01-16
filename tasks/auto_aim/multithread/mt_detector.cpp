@@ -34,6 +34,11 @@ MultiThreadDetector::MultiThreadDetector(const std::string & config_path, bool d
   std::string engine_path = model_path.substr(0, model_path.find_last_of('.')) + ".engine";
   std::ifstream engine_file(engine_path, std::ios::binary);
 
+  // Create runtime (must outlive engine)
+  runtime_ = std::shared_ptr<nvinfer1::IRuntime>(
+    nvinfer1::createInferRuntime(gLogger),
+    [](nvinfer1::IRuntime* r) { if(r) r->destroy(); });
+
   if (engine_file.good()) {
     std::cout << "Loading TensorRT engine from " << engine_path << std::endl;
     engine_file.seekg(0, std::ios::end);
@@ -43,9 +48,8 @@ MultiThreadDetector::MultiThreadDetector(const std::string & config_path, bool d
     engine_file.read(engine_data.data(), size);
     engine_file.close();
 
-    auto runtime = std::unique_ptr<nvinfer1::IRuntime>(nvinfer1::createInferRuntime(gLogger));
     engine_ = std::shared_ptr<nvinfer1::ICudaEngine>(
-      runtime->deserializeCudaEngine(engine_data.data(), size),
+      runtime_->deserializeCudaEngine(engine_data.data(), size),
       [](nvinfer1::ICudaEngine* e) { if(e) e->destroy(); });
   } else {
     std::cout << "Building TensorRT engine from ONNX: " << model_path << std::endl;
@@ -94,9 +98,8 @@ MultiThreadDetector::MultiThreadDetector(const std::string & config_path, bool d
       throw std::runtime_error("Failed to build TensorRT engine");
     }
 
-    auto runtime = std::unique_ptr<nvinfer1::IRuntime>(nvinfer1::createInferRuntime(gLogger));
     engine_ = std::shared_ptr<nvinfer1::ICudaEngine>(
-      runtime->deserializeCudaEngine(serialized_engine->data(), serialized_engine->size()),
+      runtime_->deserializeCudaEngine(serialized_engine->data(), serialized_engine->size()),
       [](nvinfer1::ICudaEngine* e) { if(e) e->destroy(); });
 
     std::ofstream engine_out(engine_path, std::ios::binary);

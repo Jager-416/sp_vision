@@ -36,7 +36,8 @@ public:
   std::vector<Object> get_onecandidatebox(cv::Mat & image);
 
 private:
-  // TensorRT members
+  // TensorRT members (runtime must outlive engine)
+  std::shared_ptr<nvinfer1::IRuntime> runtime_;
   std::shared_ptr<nvinfer1::ICudaEngine> engine_;
   std::shared_ptr<nvinfer1::IExecutionContext> context_;
   void* buffers_[2];
