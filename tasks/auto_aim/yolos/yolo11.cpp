@@ -4,9 +4,25 @@
 #include <yaml-cpp/yaml.h>
 
 #include <filesystem>
+#include <cuda_runtime.h>
+#include <fstream>
+#include <iostream>
 
 #include "tools/img_tools.hpp"
 #include "tools/logger.hpp"
+
+// TensorRT Logger
+namespace {
+class Logger : public nvinfer1::ILogger
+{
+  void log(Severity severity, const char* msg) noexcept override
+  {
+    if (severity <= Severity::kWARNING)
+      std::cout << "[TensorRT] " << msg << std::endl;
+  }
+};
+Logger gLogger;
+}
 
 namespace auto_aim
 {
@@ -30,27 +46,99 @@ YOLO11::YOLO11(const std::string & config_path, bool debug)
 
   save_path_ = "imgs";
   std::filesystem::create_directory(save_path_);
-  auto model = core_.read_model(model_path_);
-  ov::preprocess::PrePostProcessor ppp(model);
-  auto & input = ppp.input();
 
-  input.tensor()
-    .set_element_type(ov::element::u8)
-    .set_shape({1, 640, 640, 3})
-    .set_layout("NHWC")
-    .set_color_format(ov::preprocess::ColorFormat::BGR);
+  // Initialize TensorRT
+  cudaStreamCreate(&stream_);
 
-  input.model().set_layout("NCHW");
+  // Try to load .engine file first, if not found, build from ONNX
+  std::string engine_path = model_path_.substr(0, model_path_.find_last_of('.')) + ".engine";
+  std::ifstream engine_file(engine_path, std::ios::binary);
 
-  input.preprocess()
-    .convert_element_type(ov::element::f32)
-    .convert_color(ov::preprocess::ColorFormat::RGB)
-    .scale(255.0);
+  if (engine_file.good()) {
+    // Load serialized engine
+    std::cout << "Loading TensorRT engine from " << engine_path << std::endl;
+    engine_file.seekg(0, std::ios::end);
+    size_t size = engine_file.tellg();
+    engine_file.seekg(0, std::ios::beg);
+    std::vector<char> engine_data(size);
+    engine_file.read(engine_data.data(), size);
+    engine_file.close();
 
-  // TODO: ov::hint::performance_mode(ov::hint::PerformanceMode::LATENCY)
-  model = ppp.build();
-  compiled_model_ = core_.compile_model(
-    model, device_, ov::hint::performance_mode(ov::hint::PerformanceMode::LATENCY));
+    auto runtime = std::unique_ptr<nvinfer1::IRuntime>(nvinfer1::createInferRuntime(gLogger));
+    engine_ = std::shared_ptr<nvinfer1::ICudaEngine>(
+      runtime->deserializeCudaEngine(engine_data.data(), size),
+      [](nvinfer1::ICudaEngine* e) { if(e) e->destroy(); });
+  } else {
+    // Build engine from ONNX
+    std::cout << "Building TensorRT engine from ONNX: " << model_path_ << std::endl;
+    auto builder = std::unique_ptr<nvinfer1::IBuilder>(nvinfer1::createInferBuilder(gLogger));
+    auto network = std::unique_ptr<nvinfer1::INetworkDefinition>(
+      builder->createNetworkV2(1U << static_cast<uint32_t>(nvinfer1::NetworkDefinitionCreationFlag::kEXPLICIT_BATCH)));
+    auto parser = std::unique_ptr<nvonnxparser::IParser>(nvonnxparser::createParser(*network, gLogger));
+
+    // Parse ONNX file (try .onnx if .xml doesn't work)
+    std::string onnx_path = model_path_;
+    if (model_path_.substr(model_path_.find_last_of('.')) == ".xml") {
+      onnx_path = model_path_.substr(0, model_path_.find_last_of('.')) + ".onnx";
+    }
+
+    if (!parser->parseFromFile(onnx_path.c_str(), static_cast<int>(nvinfer1::ILogger::Severity::kWARNING))) {
+      throw std::runtime_error("Failed to parse ONNX file: " + onnx_path);
+    }
+
+    auto config = std::unique_ptr<nvinfer1::IBuilderConfig>(builder->createBuilderConfig());
+    config->setMemoryPoolLimit(nvinfer1::MemoryPoolType::kWORKSPACE, 1ULL << 30); // 1GB
+
+    auto serialized_engine = std::unique_ptr<nvinfer1::IHostMemory>(
+      builder->buildSerializedNetwork(*network, *config));
+
+    auto runtime = std::unique_ptr<nvinfer1::IRuntime>(nvinfer1::createInferRuntime(gLogger));
+    engine_ = std::shared_ptr<nvinfer1::ICudaEngine>(
+      runtime->deserializeCudaEngine(serialized_engine->data(), serialized_engine->size()),
+      [](nvinfer1::ICudaEngine* e) { if(e) e->destroy(); });
+
+    // Save engine for future use
+    std::ofstream engine_out(engine_path, std::ios::binary);
+    engine_out.write(static_cast<const char*>(serialized_engine->data()), serialized_engine->size());
+    engine_out.close();
+    std::cout << "Engine saved to " << engine_path << std::endl;
+  }
+
+  // Create execution context
+  context_ = std::shared_ptr<nvinfer1::IExecutionContext>(
+    engine_->createExecutionContext(),
+    [](nvinfer1::IExecutionContext* c) { if(c) c->destroy(); });
+
+  // Get input/output indices and sizes
+  input_index_ = engine_->getBindingIndex("images");
+  if (input_index_ == -1) input_index_ = 0;  // Try default index
+  output_index_ = engine_->getBindingIndex("output0");
+  if (output_index_ == -1) output_index_ = 1;  // Try default index
+
+  auto input_dims = engine_->getBindingDimensions(input_index_);
+  auto output_dims = engine_->getBindingDimensions(output_index_);
+
+  input_size_ = 1;
+  for (int i = 0; i < input_dims.nbDims; i++) {
+    input_size_ *= input_dims.d[i];
+  }
+
+  output_size_ = 1;
+  for (int i = 0; i < output_dims.nbDims; i++) {
+    output_size_ *= output_dims.d[i];
+  }
+
+  // Allocate GPU buffers
+  cudaMalloc(&buffers_[input_index_], input_size_ * sizeof(float));
+  cudaMalloc(&buffers_[output_index_], output_size_ * sizeof(float));
+}
+
+YOLO11::~YOLO11()
+{
+  // Free GPU buffers
+  if (buffers_[input_index_]) cudaFree(buffers_[input_index_]);
+  if (buffers_[output_index_]) cudaFree(buffers_[output_index_]);
+  if (stream_) cudaStreamDestroy(stream_);
 }
 
 std::list<Armor> YOLO11::detect(const cv::Mat & raw_img, int frame_count)
@@ -80,21 +168,42 @@ std::list<Armor> YOLO11::detect(const cv::Mat & raw_img, int frame_count)
   auto h = static_cast<int>(bgr_img.rows * scale);
   auto w = static_cast<int>(bgr_img.cols * scale);
 
-  // preproces
-  auto input = cv::Mat(640, 640, CV_8UC3, cv::Scalar(0, 0, 0));
+  // Preprocess: resize and pad
+  auto input_bgr = cv::Mat(640, 640, CV_8UC3, cv::Scalar(0, 0, 0));
   auto roi = cv::Rect(0, 0, w, h);
-  cv::resize(bgr_img, input(roi), {w, h});
-  ov::Tensor input_tensor(ov::element::u8, {1, 640, 640, 3}, input.data);
+  cv::resize(bgr_img, input_bgr(roi), {w, h});
 
-  /// infer
-  auto infer_request = compiled_model_.create_infer_request();
-  infer_request.set_input_tensor(input_tensor);
-  infer_request.infer();
+  // Convert BGR to RGB and normalize to [0, 1]
+  cv::Mat input_rgb;
+  cv::cvtColor(input_bgr, input_rgb, cv::COLOR_BGR2RGB);
+  input_rgb.convertTo(input_rgb, CV_32F, 1.0 / 255.0);
 
-  // postprocess
-  auto output_tensor = infer_request.get_output_tensor();
-  auto output_shape = output_tensor.get_shape();
-  cv::Mat output(output_shape[1], output_shape[2], CV_32F, output_tensor.data());
+  // Convert from HWC to CHW format for TensorRT
+  std::vector<cv::Mat> channels(3);
+  cv::split(input_rgb, channels);
+  std::vector<float> input_data;
+  input_data.reserve(640 * 640 * 3);
+  for (int c = 0; c < 3; ++c) {
+    input_data.insert(input_data.end(), (float*)channels[c].datastart, (float*)channels[c].dataend);
+  }
+
+  // Copy input data to GPU
+  cudaMemcpyAsync(buffers_[input_index_], input_data.data(), input_size_ * sizeof(float),
+                  cudaMemcpyHostToDevice, stream_);
+
+  // Execute inference
+  context_->enqueueV2(buffers_, stream_, nullptr);
+
+  // Copy output data from GPU
+  std::vector<float> output_data(output_size_);
+  cudaMemcpyAsync(output_data.data(), buffers_[output_index_], output_size_ * sizeof(float),
+                  cudaMemcpyDeviceToHost, stream_);
+  cudaStreamSynchronize(stream_);
+
+  // Get output dimensions from engine
+  auto output_dims = engine_->getBindingDimensions(output_index_);
+  // Output shape should be [1, num_detections, num_features]
+  cv::Mat output(output_dims.d[1], output_dims.d[2], CV_32F, output_data.data());
 
   return parse(scale, output, raw_img, frame_count);
 }
