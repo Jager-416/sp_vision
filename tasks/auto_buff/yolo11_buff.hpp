@@ -47,16 +47,6 @@ private:
   size_t output_size_;
   const int NUM_POINTS = 6;
 
-  // 转换图像数据: 先转换元素类型, (可选)然后归一化到[0, 1], (可选)然后交换RB通道
-  void convert(
-    const cv::Mat & input, cv::Mat & output, const bool normalize, const bool exchangeRB) const;
-
-  // 对网络的输入为图片数据的节点进行赋值，实现图片数据输入网络,return 缩放因子, 该缩放是为了将input_image塞进input_tensor
-  float fill_tensor_data_image(ov::Tensor & input_tensor, const cv::Mat & input_image) const;
-
-  // 打印模型信息, 这个函数修改自$${OPENVINO_COMMON}/utils/src/args_helper.cpp的同名函数
-  void printInputAndOutputsInfo(const ov::Model & network);
-
   // 将image保存为"../result/$${programName}.jpg"
   void save(const std::string & programName, const cv::Mat & image);
 };
