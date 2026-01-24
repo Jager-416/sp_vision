@@ -3,7 +3,8 @@
 
 #include <optional>
 
-#include "io/cboard.hpp"
+// #include "io/cboard.hpp"
+#include "io/dm_imu/dm_imu.hpp"
 #include "tasks/auto_aim/shooter.hpp"
 #include "tasks/auto_aim/tracker.hpp"
 #include "tasks/omniperception/decider.hpp"
@@ -18,7 +19,7 @@ class CommandGener
 {
 public:
   CommandGener(
-    auto_aim::Shooter & shooter, auto_aim::Aimer & aimer, io::CBoard & cboard,
+    auto_aim::Shooter & shooter, auto_aim::Aimer & aimer, io::DM_IMU & cboard,
     tools::Plotter & plotter, bool debug = false);
 
   ~CommandGener();
@@ -37,7 +38,8 @@ private:
     Eigen::Vector3d gimbal_pos;
   };
 
-  io::CBoard & cboard_;
+  // io::CBoard & cboard_;
+  io::DM_IMU & cboard_;
   auto_aim::Shooter & shooter_;
   auto_aim::Aimer & aimer_;
   tools::Plotter & plotter_;

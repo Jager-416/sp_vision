@@ -8,7 +8,7 @@ namespace multithread
 {
 
 CommandGener::CommandGener(
-  auto_aim::Shooter & shooter, auto_aim::Aimer & aimer, io::CBoard & cboard,
+  auto_aim::Shooter & shooter, auto_aim::Aimer & aimer, io::DM_IMU & cboard,
   tools::Plotter & plotter, bool debug)
 : shooter_(shooter), aimer_(aimer), cboard_(cboard), plotter_(plotter), stop_(false), debug_(debug)
 {

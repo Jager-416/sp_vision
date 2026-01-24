@@ -12,11 +12,8 @@ find_package(Eigen3 REQUIRED)
 find_package(spdlog REQUIRED)
 find_package(yaml-cpp REQUIRED)
 find_package(nlohmann_json REQUIRED)
-find_package(CUDA REQUIRED)
-
-# TensorRT paths for JetPack 6.0
-set(TensorRT_INCLUDE_DIRS "/usr/include/aarch64-linux-gnu")
-set(TensorRT_LIBRARIES nvinfer nvonnxparser nvinfer_plugin nvparsers)
+set(OpenVINO_DIR "/opt/intel/openvino_2025.4.0/runtime/cmake/")
+find_package(OpenVINO REQUIRED)
 
 include_directories(${EIGEN3_INCLUDE_DIR})
 include_directories(${OpenCV_INCLUDE_DIRS})
@@ -78,7 +75,7 @@ add_executable(gimbal_response_test tests/gimbal_response_test.cpp)
 add_executable(multi_usbcamera_test tests/multi_usbcamera_test.cpp)
 add_executable(usbcamera_detect_test tests/usbcamera_detect_test.cpp)
 add_executable(usbcamera_test tests/usbcamera_test.cpp)
-add_executable(handeye_test tests/handeye_test.cpp)
+# add_executable(handeye_test tests/handeye_test.cpp)
 add_executable(dm_test tests/dm_test.cpp)
 add_executable(minimum_vision_system tests/minimum_vision_system.cpp)
 
@@ -94,7 +91,7 @@ target_link_libraries(gimbal_response_test ${OpenCV_LIBS} fmt::fmt yaml-cpp tool
 target_link_libraries(multi_usbcamera_test ${OpenCV_LIBS} fmt::fmt tools io)
 target_link_libraries(usbcamera_detect_test ${OpenCV_LIBS} fmt::fmt yaml-cpp tools io auto_aim)
 target_link_libraries(usbcamera_test ${OpenCV_LIBS} fmt::fmt yaml-cpp tools io)
-target_link_libraries(handeye_test ${OpenCV_LIBS} fmt::fmt yaml-cpp tools io auto_aim)
+# target_link_libraries(handeye_test ${OpenCV_LIBS} fmt::fmt yaml-cpp tools io auto_aim)
 target_link_libraries(dm_test ${OpenCV_LIBS} fmt::fmt yaml-cpp tools io)
 target_link_libraries(minimum_vision_system ${OpenCV_LIBS} fmt::fmt yaml-cpp tools io auto_aim)
 

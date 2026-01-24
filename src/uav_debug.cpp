@@ -37,7 +37,7 @@ int main(int argc, char * argv[])
   tools::Recorder recorder;
 
   io::Camera camera(config_path);
-  io::CBoard cboard(config_path);
+  io::DM_IMU cboard;
 
   auto_aim::Detector detector(config_path);
   auto_aim::Solver solver(config_path);

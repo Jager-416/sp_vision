@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.16)
 
-find_package(CUDA REQUIRED)
+set(OpenVINO_DIR "/opt/intel/openvino_2025.4.0/runtime/cmake")
 
 # TensorRT paths for JetPack 6.0
 set(TensorRT_INCLUDE_DIRS "/usr/include/aarch64-linux-gnu")
