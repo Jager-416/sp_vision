@@ -21,7 +21,7 @@ int main()
     Eigen::Quaterniond q = imu.imu_at(timestamp);
 
     Eigen::Vector3d eulers = tools::eulers(q, 2, 1, 0) * 57.3;
-    tools::logger()->info("z{:.2f} y{:.2f} x{:.2f} degree", eulers[0], eulers[1], eulers[2]);
+    // tools::logger()->info("z{:.2f} y{:.2f} x{:.2f} degree", eulers[0], eulers[1], eulers[2]);
   }
 
   return 0;

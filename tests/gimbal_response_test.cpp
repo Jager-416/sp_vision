@@ -3,7 +3,8 @@
 #include <opencv2/opencv.hpp>
 #include <thread>
 
-#include "io/cboard.hpp"
+// #include "io/cboard.hpp"
+#include "io/dm_imu/dm_imu.hpp"
 #include "io/command.hpp"
 #include "tools/exiter.hpp"
 #include "tools/logger.hpp"
@@ -52,7 +53,8 @@ int main(int argc, char * argv[])
   tools::Exiter exiter;
   tools::Plotter plotter;
 
-  io::CBoard cboard(config_path);
+  // io::CBoard cboard(config_path);
+  io::DM_IMU cboard;
 
   auto init_angle = 0;
   double slice = circle * 100;  //切片数=周期*帧率

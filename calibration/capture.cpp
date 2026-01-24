@@ -5,7 +5,8 @@
 #include <opencv2/opencv.hpp>
 
 #include "io/camera.hpp"
-#include "io/cboard.hpp"
+// #include "io/cboard.hpp"
+#include "io/dm_imu/dm_imu.hpp"
 #include "tools/img_tools.hpp"
 #include "tools/logger.hpp"
 #include "tools/math_tools.hpp"
@@ -27,7 +28,7 @@ void write_q(const std::string q_path, const Eigen::Quaterniond & q)
 void capture_loop(
   const std::string & config_path, const std::string & can, const std::string & output_folder)
 {
-  io::CBoard cboard(config_path);
+  io::DM_IMU cboard;
   io::Camera camera(config_path);
   cv::Mat img;
   std::chrono::steady_clock::time_point timestamp;
