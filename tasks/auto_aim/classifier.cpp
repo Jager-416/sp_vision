@@ -1,17 +1,140 @@
 #include "classifier.hpp"
 
 #include <yaml-cpp/yaml.h>
+#include <cuda_runtime.h>
+#include <fstream>
+#include <iostream>
+
+// TensorRT Logger
+class Logger : public nvinfer1::ILogger
+{
+  void log(Severity severity, const char* msg) noexcept override
+  {
+    if (severity <= Severity::kWARNING)
+      std::cout << msg << std::endl;
+  }
+} gLogger;
 
 namespace auto_aim
 {
 Classifier::Classifier(const std::string & config_path)
 {
   auto yaml = YAML::LoadFile(config_path);
-  auto model = yaml["classify_model"].as<std::string>();
-  net_ = cv::dnn::readNetFromONNX(model);
-  auto ovmodel = core_.read_model(model);
-  compiled_model_ = core_.compile_model(
-    ovmodel, "AUTO", ov::hint::performance_mode(ov::hint::PerformanceMode::LATENCY));
+  auto model_path = yaml["classify_model"].as<std::string>();
+  net_ = cv::dnn::readNetFromONNX(model_path);
+
+  // Initialize TensorRT
+  cudaStreamCreate(&stream_);
+
+  // Try to load .engine file first, if not found, build from ONNX
+  std::string engine_path = model_path.substr(0, model_path.find_last_of('.')) + ".engine";
+  std::ifstream engine_file(engine_path, std::ios::binary);
+
+  // Create runtime (must outlive engine)
+  runtime_ = std::shared_ptr<nvinfer1::IRuntime>(
+    nvinfer1::createInferRuntime(gLogger),
+    [](nvinfer1::IRuntime* r) { if(r) r->destroy(); });
+
+  if (engine_file.good()) {
+    // Load serialized engine
+    std::cout << "Loading TensorRT engine from " << engine_path << std::endl;
+    engine_file.seekg(0, std::ios::end);
+    size_t size = engine_file.tellg();
+    engine_file.seekg(0, std::ios::beg);
+    std::vector<char> engine_data(size);
+    engine_file.read(engine_data.data(), size);
+    engine_file.close();
+
+    engine_ = std::shared_ptr<nvinfer1::ICudaEngine>(
+      runtime_->deserializeCudaEngine(engine_data.data(), size),
+      [](nvinfer1::ICudaEngine* e) { if(e) e->destroy(); });
+  } else {
+    // Build engine from ONNX
+    std::cout << "Building TensorRT engine from ONNX: " << model_path << std::endl;
+    auto builder = std::unique_ptr<nvinfer1::IBuilder>(nvinfer1::createInferBuilder(gLogger));
+    auto network = std::unique_ptr<nvinfer1::INetworkDefinition>(
+      builder->createNetworkV2(1U << static_cast<uint32_t>(nvinfer1::NetworkDefinitionCreationFlag::kEXPLICIT_BATCH)));
+    auto parser = std::unique_ptr<nvonnxparser::IParser>(nvonnxparser::createParser(*network, gLogger));
+
+    if (!parser->parseFromFile(model_path.c_str(), static_cast<int>(nvinfer1::ILogger::Severity::kWARNING))) {
+      throw std::runtime_error("Failed to parse ONNX file");
+    }
+
+    auto config = std::unique_ptr<nvinfer1::IBuilderConfig>(builder->createBuilderConfig());
+    config->setMemoryPoolLimit(nvinfer1::MemoryPoolType::kWORKSPACE, 1ULL << 30); // 1GB
+
+    // Check if model has dynamic shapes and create optimization profile
+    auto input = network->getInput(0);
+    auto input_dims = input->getDimensions();
+    bool has_dynamic_shapes = false;
+    for (int i = 0; i < input_dims.nbDims; i++) {
+      if (input_dims.d[i] == -1) {
+        has_dynamic_shapes = true;
+        break;
+      }
+    }
+
+    if (has_dynamic_shapes) {
+      auto profile = builder->createOptimizationProfile();
+      // For classifier: input shape is [batch, channels, height, width] = [1, 1, 32, 32]
+      nvinfer1::Dims4 dims(1, 1, 32, 32);
+      profile->setDimensions(input->getName(), nvinfer1::OptProfileSelector::kMIN, dims);
+      profile->setDimensions(input->getName(), nvinfer1::OptProfileSelector::kOPT, dims);
+      profile->setDimensions(input->getName(), nvinfer1::OptProfileSelector::kMAX, dims);
+      config->addOptimizationProfile(profile);
+    }
+
+    auto serialized_engine = std::unique_ptr<nvinfer1::IHostMemory>(
+      builder->buildSerializedNetwork(*network, *config));
+
+    if (!serialized_engine) {
+      throw std::runtime_error("Failed to build TensorRT engine");
+    }
+
+    engine_ = std::shared_ptr<nvinfer1::ICudaEngine>(
+      runtime_->deserializeCudaEngine(serialized_engine->data(), serialized_engine->size()),
+      [](nvinfer1::ICudaEngine* e) { if(e) e->destroy(); });
+
+    // Save engine for future use
+    std::ofstream engine_out(engine_path, std::ios::binary);
+    engine_out.write(static_cast<const char*>(serialized_engine->data()), serialized_engine->size());
+    engine_out.close();
+    std::cout << "Engine saved to " << engine_path << std::endl;
+  }
+
+  // Create execution context
+  context_ = std::shared_ptr<nvinfer1::IExecutionContext>(
+    engine_->createExecutionContext(),
+    [](nvinfer1::IExecutionContext* c) { if(c) c->destroy(); });
+
+  // Get input/output indices and sizes
+  input_index_ = engine_->getBindingIndex("input");
+  output_index_ = engine_->getBindingIndex("output");
+
+  auto input_dims = engine_->getBindingDimensions(input_index_);
+  auto output_dims = engine_->getBindingDimensions(output_index_);
+
+  input_size_ = 1;
+  for (int i = 0; i < input_dims.nbDims; i++) {
+    input_size_ *= input_dims.d[i];
+  }
+
+  output_size_ = 1;
+  for (int i = 0; i < output_dims.nbDims; i++) {
+    output_size_ *= output_dims.d[i];
+  }
+
+  // Allocate GPU buffers
+  cudaMalloc(&buffers_[input_index_], input_size_ * sizeof(float));
+  cudaMalloc(&buffers_[output_index_], output_size_ * sizeof(float));
+}
+
+Classifier::~Classifier()
+{
+  // Free GPU buffers
+  if (buffers_[input_index_]) cudaFree(buffers_[input_index_]);
+  if (buffers_[output_index_]) cudaFree(buffers_[output_index_]);
+  if (stream_) cudaStreamDestroy(stream_);
 }
 
 void Classifier::classify(Armor & armor)
@@ -86,15 +209,21 @@ void Classifier::ovclassify(Armor & armor)
   // Normalize the input image to [0, 1] range
   input.convertTo(input, CV_32F, 1.0 / 255.0);
 
-  ov::Tensor input_tensor(ov::element::f32, {1, 1, 32, 32}, input.data);
+  // Copy input data to GPU
+  cudaMemcpyAsync(buffers_[input_index_], input.data, input_size_ * sizeof(float),
+                  cudaMemcpyHostToDevice, stream_);
 
-  ov::InferRequest infer_request = compiled_model_.create_infer_request();
-  infer_request.set_input_tensor(input_tensor);
-  infer_request.infer();
+  // Execute inference
+  context_->enqueueV2(buffers_, stream_, nullptr);
 
-  auto output_tensor = infer_request.get_output_tensor();
-  auto output_shape = output_tensor.get_shape();
-  cv::Mat outputs(1, 9, CV_32F, output_tensor.data());
+  // Copy output data from GPU
+  std::vector<float> output_data(output_size_);
+  cudaMemcpyAsync(output_data.data(), buffers_[output_index_], output_size_ * sizeof(float),
+                  cudaMemcpyDeviceToHost, stream_);
+  cudaStreamSynchronize(stream_);
+
+  // Create cv::Mat from output data
+  cv::Mat outputs(1, 9, CV_32F, output_data.data());
 
   // Softmax
   float max = *std::max_element(outputs.begin<float>(), outputs.end<float>());

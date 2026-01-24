@@ -3,7 +3,9 @@
 
 #include <list>
 #include <opencv2/opencv.hpp>
-#include <openvino/openvino.hpp>
+#include <NvInfer.h>
+#include <NvOnnxParser.h>
+#include <memory>
 #include <string>
 #include <vector>
 
@@ -17,6 +19,7 @@ class YOLOV5 : public YOLOBase
 {
 public:
   YOLOV5(const std::string & config_path, bool debug);
+  ~YOLOV5();
 
   std::list<Armor> detect(const cv::Mat & bgr_img, int frame_count) override;
 
@@ -33,8 +36,16 @@ private:
   const float score_threshold_ = 0.7;
   double min_confidence_, binary_threshold_;
 
-  ov::Core core_;
-  ov::CompiledModel compiled_model_;
+  // TensorRT members (runtime must outlive engine)
+  std::shared_ptr<nvinfer1::IRuntime> runtime_;
+  std::shared_ptr<nvinfer1::ICudaEngine> engine_;
+  std::shared_ptr<nvinfer1::IExecutionContext> context_;
+  void* buffers_[2]; // input and output buffers
+  cudaStream_t stream_;
+  int input_index_;
+  int output_index_;
+  size_t input_size_;
+  size_t output_size_;
 
   cv::Rect roi_;
   cv::Point2f offset_;

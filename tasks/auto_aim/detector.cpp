@@ -5,6 +5,8 @@
 
 #include <filesystem>
 
+#include <numeric>
+
 #include "tools/img_tools.hpp"
 #include "tools/logger.hpp"
 

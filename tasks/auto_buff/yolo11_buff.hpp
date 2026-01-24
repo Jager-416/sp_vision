@@ -4,7 +4,10 @@
 
 #include <filesystem>
 #include <opencv2/opencv.hpp>
-#include <openvino/openvino.hpp>
+#include <NvInfer.h>
+#include <NvOnnxParser.h>
+#include <cuda_runtime.h>
+#include <memory>
 
 #include "tools/logger.hpp"
 
@@ -24,6 +27,7 @@ public:
   };
 
   YOLO11_BUFF(const std::string & config);
+  ~YOLO11_BUFF();
 
   // 使用NMS，用来获取多个框
   std::vector<Object> get_multicandidateboxes(cv::Mat & image);
@@ -32,22 +36,17 @@ public:
   std::vector<Object> get_onecandidatebox(cv::Mat & image);
 
 private:
-  ov::Core core;  // 创建OpenVINO Runtime Core对象
-  std::shared_ptr<ov::Model> model;
-  ov::CompiledModel compiled_model;
-  ov::InferRequest infer_request;
-  ov::Tensor input_tensor;
+  // TensorRT members (runtime must outlive engine)
+  std::shared_ptr<nvinfer1::IRuntime> runtime_;
+  std::shared_ptr<nvinfer1::ICudaEngine> engine_;
+  std::shared_ptr<nvinfer1::IExecutionContext> context_;
+  void* buffers_[2];
+  cudaStream_t stream_;
+  int input_index_;
+  int output_index_;
+  size_t input_size_;
+  size_t output_size_;
   const int NUM_POINTS = 6;
-
-  // 转换图像数据: 先转换元素类型, (可选)然后归一化到[0, 1], (可选)然后交换RB通道
-  void convert(
-    const cv::Mat & input, cv::Mat & output, const bool normalize, const bool exchangeRB) const;
-
-  // 对网络的输入为图片数据的节点进行赋值，实现图片数据输入网络,return 缩放因子, 该缩放是为了将input_image塞进input_tensor
-  float fill_tensor_data_image(ov::Tensor & input_tensor, const cv::Mat & input_image) const;
-
-  // 打印模型信息, 这个函数修改自$${OPENVINO_COMMON}/utils/src/args_helper.cpp的同名函数
-  void printInputAndOutputsInfo(const ov::Model & network);
 
   // 将image保存为"../result/$${programName}.jpg"
   void save(const std::string & programName, const cv::Mat & image);

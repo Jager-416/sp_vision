@@ -17,6 +17,8 @@ find_package(OpenVINO REQUIRED)
 
 include_directories(${EIGEN3_INCLUDE_DIR})
 include_directories(${OpenCV_INCLUDE_DIRS})
+include_directories(${CUDA_INCLUDE_DIRS})
+include_directories(${TensorRT_INCLUDE_DIRS})
 include_directories(${PROJECT_SOURCE_DIR})
 
 
